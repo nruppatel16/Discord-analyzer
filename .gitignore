@@ -1,0 +1,8 @@
+.env
+analyzer.db
+reports/latest.html
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

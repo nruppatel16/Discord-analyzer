@@ -1,0 +1,26 @@
+servers:
+  - name: "The Money Maze Community"
+    server_id: ""              # fill in your Discord server ID
+    mode: "qa_educational"     # extracts Q&A + progressive lessons
+    channels:
+      - name: "single-stock-picks"
+        channel_id: ""
+      - name: "stock-discussions"
+        channel_id: ""
+
+  - name: "Market Masters"
+    server_id: ""              # fill in your Discord server ID
+    mode: "ticker_discussion"  # extracts ticker mentions + sentiment
+    channels:
+      - name: "swing-trades"
+        channel_id: ""
+      - name: "trade-recaps"
+        channel_id: ""
+      - name: "oversold-trades"
+        channel_id: ""
+      - name: "value-investing"
+        channel_id: ""
+      - name: "chat"
+        channel_id: ""
+
+# To add a new server: copy one block above, fill in name/server_id/mode/channels
