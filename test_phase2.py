@@ -1,8 +1,8 @@
 """
-test_phase2.py — Phase 2 verification for analyzer.py Ollama integration.
+test_phase2.py — Phase 2 verification for analyzer.py LLM-API integration.
 
 Covers:
-  1. Ollama unavailable  → full stub fallback, no crash
+  1. LLM API unavailable → full stub fallback, no crash
   2. Batch chunking      → >50 messages split into correct batches
   3. JSON parsing        → markdown fences stripped, bad JSON caught
   4. Per-section fallback → one call fails, others continue (via monkeypatch)
@@ -11,6 +11,7 @@ Covers:
 """
 
 import json
+import os
 import sys
 import types
 import unittest
@@ -63,12 +64,12 @@ def _make_qa_group(n=5):
 # Test 1: Ollama unavailable → full stub fallback, no crash
 # ---------------------------------------------------------------------------
 print("=" * 60)
-print("TEST 1 — Ollama unavailable: full stub fallback")
+print("TEST 1 — LLM API unavailable: full stub fallback")
 print("=" * 60)
 
 groups = [_make_group(), _make_qa_group()]
 
-with patch("analyzer._check_ollama", return_value=False):
+with patch("analyzer._get_client", return_value=None):
     result = analyzer.analyze(groups)
 
 assert "tickers"            in result, "Missing tickers key"
@@ -190,13 +191,13 @@ general_response = json.dumps({
 call_sequence = [ticker_response, lesson_response, general_response]
 call_idx = [0]
 
-def mock_ollama_success(url, model, prompt):
+def mock_llm_success(prompt):
     idx = call_idx[0] % len(call_sequence)
     call_idx[0] += 1
     return call_sequence[idx % 3]
 
-with patch("analyzer._check_ollama", return_value=True), \
-     patch("analyzer._ollama_call", side_effect=mock_ollama_success), \
+with patch("analyzer._get_client", return_value=MagicMock()), \
+     patch("analyzer._llm_call", side_effect=mock_llm_success), \
      patch("time.sleep"):
     result = analyzer.analyze(groups)
 
@@ -208,13 +209,13 @@ print(f"      Tickers: {[t['symbol'] for t in result['tickers']]}")
 call_idx[0] = 0
 responses_with_ticker_fail = [None, lesson_response, general_response]
 
-def mock_ollama_ticker_fail(url, model, prompt):
+def mock_llm_ticker_fail(prompt):
     idx = call_idx[0] % 3
     call_idx[0] += 1
     return responses_with_ticker_fail[idx]
 
-with patch("analyzer._check_ollama", return_value=True), \
-     patch("analyzer._ollama_call", side_effect=mock_ollama_ticker_fail), \
+with patch("analyzer._get_client", return_value=MagicMock()), \
+     patch("analyzer._llm_call", side_effect=mock_llm_ticker_fail), \
      patch("time.sleep"):
     result = analyzer.analyze(groups)
 
@@ -229,13 +230,13 @@ print("  4b. Ticker call fails → stub tickers, real lessons: PASSED")
 call_idx[0] = 0
 responses_with_lesson_bad_json = [ticker_response, "not valid json at all", general_response]
 
-def mock_ollama_lesson_bad(url, model, prompt):
+def mock_llm_lesson_bad(prompt):
     idx = call_idx[0] % 3
     call_idx[0] += 1
     return responses_with_lesson_bad_json[idx]
 
-with patch("analyzer._check_ollama", return_value=True), \
-     patch("analyzer._ollama_call", side_effect=mock_ollama_lesson_bad), \
+with patch("analyzer._get_client", return_value=MagicMock()), \
+     patch("analyzer._llm_call", side_effect=mock_llm_lesson_bad), \
      patch("time.sleep"):
     result = analyzer.analyze(groups)
 
@@ -280,7 +281,7 @@ responses_general = [batch1_general, batch2_general]
 big_group = _make_group(n=80)
 call_log = []
 
-def mock_merge_test(url, model, prompt):
+def mock_merge_test(prompt):
     call_log.append(prompt[:80])
     if "tickers" in prompt.lower() or "financial analyst" in prompt.lower():
         idx = len([c for c in call_log if "analyst" in c or "ticker" in c.lower()])
@@ -336,12 +337,17 @@ print("=" * 60)
 print("TEST 6 — End-to-end: mock_test.py still passes with new analyzer")
 print("=" * 60)
 
+# Ensure no inherited LLM key so the subprocess takes the stub-fallback path
+_env = dict(os.environ)
+_env.pop("LLM_API_KEY", None)
+
 import subprocess
 result_proc = subprocess.run(
     ["python3", "mock_test.py"],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,  # merge stderr into stdout so we capture log lines too
     text=True,
+    env=_env,
 )
 if result_proc.returncode != 0:
     print("  OUTPUT:", result_proc.stdout[-1000:])
@@ -350,7 +356,8 @@ if result_proc.returncode != 0:
 # Check key lines in combined output
 output = result_proc.stdout
 assert "PHASE 1 DRY RUN — ALL STEPS PASSED" in output, "mock_test.py did not report all passed"
-assert "Ollama not reachable" in output, "Expected fallback message in output"
+assert "LLM API not configured" in output or "LLM_API_KEY not set" in output, \
+    "Expected fallback message in output"
 print("  mock_test.py output (last 6 lines):")
 for line in output.strip().splitlines()[-6:]:
     print(f"    {line}")
@@ -364,12 +371,12 @@ print("=" * 60)
 print("  PHASE 2 VERIFICATION — ALL TESTS PASSED")
 print("=" * 60)
 print()
-print("  ✅ Ollama unavailable     → full stub fallback, no crash")
+print("  ✅ LLM API unavailable    → full stub fallback, no crash")
 print("  ✅ Batch chunking         → 120 msgs → [50, 50, 20] batches")
 print("  ✅ JSON parsing           → fences, prose, bad input all handled")
 print("  ✅ Per-section fallback   → each section fails independently")
 print("  ✅ Result merging         → mentions accumulated, highlights deduped")
 print("  ✅ mock_test.py end-to-end → still passes with new analyzer")
 print()
-print("  Ollama integration complete.")
-print("  To activate: ollama pull qwen2.5:7b  →  set OLLAMA_URL in .env")
+print("  LLM API integration complete.")
+print("  To activate: set LLM_API_KEY (and LLM_MODEL) in .env")

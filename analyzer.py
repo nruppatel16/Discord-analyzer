@@ -1,16 +1,20 @@
 """
-analyzer.py — Analyzes grouped conversation data using Ollama LLM.
+analyzer.py — Analyzes grouped conversation data using a hosted LLM API.
 
-PHASE 2: Real LLM integration.
+Uses an OpenAI-compatible Chat Completions endpoint (default: NVIDIA NIM at
+integrate.api.nvidia.com). Configure via .env:
+    LLM_API_KEY    — API key (e.g. nvapi-...)
+    LLM_BASE_URL   — base URL (default: NVIDIA integrate endpoint)
+    LLM_MODEL      — model id (default: nvidia/nemotron-3-ultra-550b-a55b)
 
-Three separate Ollama calls per run:
+Three separate LLM calls per run:
   1. Ticker extraction   — all messages, all channels
   2. Lessons             — qa_educational channels only
   3. General discussion  — all messages, all channels
 
-Batching: max 50 messages per call (fits 8 GB RAM + 7B model context).
-3-second delay between calls to avoid overloading Ollama.
-Fallback: on any error (connection, timeout, bad JSON) the affected
+Batching: max 50 messages per call.
+3-second delay between calls to stay within rate limits.
+Fallback: on any error (auth, network, timeout, bad JSON) the affected
 section falls back to stub output. Other sections continue unaffected.
 The pipeline never crashes.
 """
@@ -21,13 +25,39 @@ import os
 import re
 import time
 
-import requests
-
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 50        # max messages per Ollama call
-CALL_DELAY = 3         # seconds between Ollama calls
-OLLAMA_TIMEOUT = 120   # seconds per HTTP request
+BATCH_SIZE = 50        # max messages per LLM call
+CALL_DELAY = 3         # seconds between LLM calls
+LLM_TIMEOUT = 300      # seconds per request (reasoning models can be slow)
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+
+# Lazily-initialised OpenAI-compatible client (built on first use, after .env loads)
+_client = None
+_client_initialized = False
+
+
+def _get_client():
+    """Build and cache the OpenAI-compatible client. Returns None if unconfigured."""
+    global _client, _client_initialized
+    if _client_initialized:
+        return _client
+    _client_initialized = True
+
+    api_key = os.getenv("LLM_API_KEY", "").strip()
+    base_url = os.getenv("LLM_BASE_URL", DEFAULT_BASE_URL).strip()
+    if not api_key:
+        logger.warning("LLM_API_KEY not set — LLM analysis disabled.")
+        return None
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.error("openai package not installed. Run: pip install -r requirements.txt")
+        return None
+
+    _client = OpenAI(base_url=base_url, api_key=api_key)
+    return _client
 
 # ---------------------------------------------------------------------------
 # Stub utilities — regex ticker extraction, kept for fallback
@@ -58,17 +88,14 @@ def analyze(conversation_groups: list) -> dict:
         "general_discussion": [...]
     }
     """
-    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-
-    # ── Connectivity check ────────────────────────────────────────────────
-    if not _check_ollama(ollama_url):
+    # ── Client readiness check ────────────────────────────────────────────
+    if _get_client() is None:
         logger.warning(
-            "Ollama not reachable at %s — falling back to stub for all sections.", ollama_url
+            "LLM API not configured (set LLM_API_KEY) — falling back to stub for all sections."
         )
         return _stub_analyze_all(conversation_groups)
 
-    logger.info("Ollama reachable at %s  model=%s", ollama_url, model)
+    logger.info("LLM API ready — model=%s", os.getenv("LLM_MODEL", DEFAULT_MODEL))
 
     # ── Flatten message lists with their server/channel context ──────────
     all_ctx: list[dict] = []     # every message + context
@@ -90,24 +117,24 @@ def analyze(conversation_groups: list) -> dict:
 
     # ── Call 1: Ticker extraction ─────────────────────────────────────────
     logger.info(
-        "Ollama 1/3 — Ticker extraction  (%d messages, batch=%d)",
+        "LLM 1/3 — Ticker extraction  (%d messages, batch=%d)",
         len(all_ctx), BATCH_SIZE,
     )
-    tickers = _call_tickers(ollama_url, model, all_ctx, conversation_groups)
+    tickers = _call_tickers(all_ctx, conversation_groups)
     time.sleep(CALL_DELAY)
 
     # ── Call 2: Lessons ───────────────────────────────────────────────────
     logger.info(
-        "Ollama 2/3 — Lessons  (%d qa_educational messages)", len(qa_ctx)
+        "LLM 2/3 — Lessons  (%d qa_educational messages)", len(qa_ctx)
     )
-    lessons = _call_lessons(ollama_url, model, qa_ctx, conversation_groups)
+    lessons = _call_lessons(qa_ctx, conversation_groups)
     time.sleep(CALL_DELAY)
 
     # ── Call 3: General discussion ────────────────────────────────────────
     logger.info(
-        "Ollama 3/3 — General discussion  (%d messages)", len(all_ctx)
+        "LLM 3/3 — General discussion  (%d messages)", len(all_ctx)
     )
-    general_discussion = _call_general(ollama_url, model, all_ctx, conversation_groups)
+    general_discussion = _call_general(all_ctx, conversation_groups)
 
     return {
         "tickers":            tickers,
@@ -144,11 +171,9 @@ _TICKER_SYSTEM = (
 )
 
 
-def _call_tickers(
-    url: str, model: str, all_ctx: list, conversation_groups: list
-) -> list:
+def _call_tickers(all_ctx: list, conversation_groups: list) -> list:
     """
-    Batch all messages into 50-message chunks, call Ollama for each,
+    Batch all messages into 50-message chunks, call the LLM for each,
     merge ticker results across batches.
     Falls back to stub if every batch fails.
     """
@@ -159,7 +184,7 @@ def _call_tickers(
         messages_text = _format_messages(batch)
         prompt = f"{_TICKER_SYSTEM}\n\nMessages:\n{messages_text}"
 
-        raw = _ollama_call(url, model, prompt)
+        raw = _llm_call(prompt)
         if raw is None:
             logger.warning("Ticker batch failed — skipping batch of %d.", len(batch))
             continue
@@ -228,11 +253,9 @@ _LESSONS_SYSTEM = (
 )
 
 
-def _call_lessons(
-    url: str, model: str, qa_ctx: list, conversation_groups: list
-) -> list:
+def _call_lessons(qa_ctx: list, conversation_groups: list) -> list:
     """
-    Batch qa_educational messages, call Ollama for lessons.
+    Batch qa_educational messages, call the LLM for lessons.
     Merges lesson content for the same (server, channel) across batches.
     Falls back to stub if no batches succeed.
     """
@@ -247,7 +270,7 @@ def _call_lessons(
         messages_text = _format_messages(batch)
         prompt = f"{_LESSONS_SYSTEM}\n\nMessages:\n{messages_text}"
 
-        raw = _ollama_call(url, model, prompt)
+        raw = _llm_call(prompt)
         if raw is None:
             logger.warning("Lessons batch failed — skipping batch of %d.", len(batch))
             continue
@@ -309,11 +332,9 @@ _GENERAL_SYSTEM = (
 )
 
 
-def _call_general(
-    url: str, model: str, all_ctx: list, conversation_groups: list
-) -> list:
+def _call_general(all_ctx: list, conversation_groups: list) -> list:
     """
-    Batch all messages, call Ollama for general discussion highlights.
+    Batch all messages, call the LLM for general discussion highlights.
     Merges highlights for the same (server, channel) across batches.
     Falls back to stub if no batches succeed.
     """
@@ -325,7 +346,7 @@ def _call_general(
         messages_text = _format_messages(batch)
         prompt = f"{_GENERAL_SYSTEM}\n\nMessages:\n{messages_text}"
 
-        raw = _ollama_call(url, model, prompt)
+        raw = _llm_call(prompt)
         if raw is None:
             logger.warning("General batch failed — skipping batch of %d.", len(batch))
             continue
@@ -365,54 +386,67 @@ def _call_general(
 
 
 # ===========================================================================
-# Core Ollama HTTP call
+# Core LLM API call
 # ===========================================================================
 
-def _ollama_call(url: str, model: str, prompt: str) -> str | None:
+def _llm_call(prompt: str) -> str | None:
     """
-    POST to Ollama /api/generate. Returns the response string, or None on error.
-    Handles: connection refused, timeout, non-200 status, malformed response.
+    Call the OpenAI-compatible Chat Completions endpoint and return the
+    response text (streamed and accumulated), or None on any error.
+
+    Reasoning ('thinking') tokens are emitted on a separate `reasoning_content`
+    field and ignored here — only the final answer (`content`) is collected.
+
+    Tunable via .env:
+        LLM_MODEL            — model id
+        LLM_MAX_TOKENS       — completion cap (default 16384)
+        LLM_TEMPERATURE      — sampling temperature (default 0.6)
+        LLM_ENABLE_THINKING  — "true"/"false" (default false; off = more
+                               reliable JSON, on = deeper reasoning, slower)
+        LLM_REASONING_BUDGET — token budget for thinking when enabled (default 8192)
     """
-    endpoint = f"{url}/api/generate"
-    payload = {"model": model, "prompt": prompt, "stream": False}
+    client = _get_client()
+    if client is None:
+        return None
+
+    model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "16384"))
+    temperature = float(os.getenv("LLM_TEMPERATURE", "0.6"))
+    enable_thinking = os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
+
+    extra_body: dict = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    if enable_thinking:
+        extra_body["reasoning_budget"] = int(os.getenv("LLM_REASONING_BUDGET", "8192"))
 
     try:
-        resp = requests.post(endpoint, json=payload, timeout=OLLAMA_TIMEOUT)
-    except requests.exceptions.ConnectionError as exc:
-        logger.error("Ollama connection refused at %s: %s", endpoint, exc)
-        return None
-    except requests.exceptions.Timeout:
-        logger.error("Ollama request timed out after %ds.", OLLAMA_TIMEOUT)
-        return None
-    except requests.exceptions.RequestException as exc:
-        logger.error("Ollama request error: %s", exc)
-        return None
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            top_p=0.95,
+            max_tokens=max_tokens,
+            extra_body=extra_body,
+            stream=True,
+            timeout=LLM_TIMEOUT,
+        )
 
-    if resp.status_code != 200:
-        logger.error("Ollama returned HTTP %d: %s", resp.status_code, resp.text[:200])
+        parts = []
+        for chunk in completion:
+            if not chunk.choices:
+                continue
+            content = getattr(chunk.choices[0].delta, "content", None)
+            if content:
+                parts.append(content)
+
+        text = "".join(parts).strip()
+        if not text:
+            logger.warning("LLM returned an empty response.")
+            return None
+        return text
+
+    except Exception as exc:  # broad catch: never crash the pipeline on an API error
+        logger.error("LLM API call failed: %s", exc)
         return None
-
-    try:
-        data = resp.json()
-    except ValueError:
-        logger.error("Ollama response is not valid JSON.")
-        return None
-
-    response_text = data.get("response", "").strip()
-    if not response_text:
-        logger.warning("Ollama returned an empty response.")
-        return None
-
-    return response_text
-
-
-def _check_ollama(url: str) -> bool:
-    """Quick health check: GET /api/tags (Ollama's list-models endpoint)."""
-    try:
-        resp = requests.get(f"{url}/api/tags", timeout=5)
-        return resp.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
 
 
 # ===========================================================================
@@ -488,7 +522,7 @@ def _batch(items: list, size: int):
 
 
 # ===========================================================================
-# Stub fallbacks — used when Ollama is unavailable or a section fails
+# Stub fallbacks — used when the LLM API is unavailable or a section fails
 # ===========================================================================
 
 def _stub_analyze_all(conversation_groups: list) -> dict:
@@ -579,7 +613,7 @@ def _stub_analyze_group(group: dict) -> dict:
             "community_bet": "[STUB] Community position pending LLM",
             "reason":        (
                 f"[STUB] {sym} was discussed in #{channel} on {server}. "
-                "Ollama unavailable — connect LLM for real analysis."
+                "LLM API unavailable — set LLM_API_KEY for real analysis."
             ),
         })
 
@@ -590,7 +624,7 @@ def _stub_analyze_group(group: dict) -> dict:
             "topic":   f"[STUB] Lesson from #{channel}",
             "content": (
                 "[STUB] Progressive learning narrative will appear here once "
-                f"Ollama is connected. ({len(messages)} messages from {len(authors)} user(s).)"
+                f"the LLM API is connected. ({len(messages)} messages from {len(authors)} user(s).)"
             ),
         })
 
@@ -599,7 +633,7 @@ def _stub_analyze_group(group: dict) -> dict:
         "channel": channel,
         "highlights": [
             f"[STUB] {len(messages)} messages from {len(authors)} user(s).",
-            "[STUB] Connect Ollama to see real highlights.",
+            "[STUB] Set LLM_API_KEY to see real highlights.",
             f"[STUB] Sample: \"{all_text[:120].strip()}...\"" if len(all_text) > 120
             else f"[STUB] Content: \"{all_text.strip()}\"",
         ],

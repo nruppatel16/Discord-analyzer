@@ -19,8 +19,8 @@ echo "========================================"
 # 1. Install Python dependencies
 echo ""
 echo "[1/5] Installing Python dependencies ..."
-pip3 install --quiet requests pyyaml python-dotenv
-echo "      Done: requests, pyyaml, python-dotenv installed."
+pip3 install --quiet --disable-pip-version-check -r "$SCRIPT_DIR/requirements.txt"
+echo "      Done: dependencies from requirements.txt installed."
 
 # 2. Create reports/ and logs/ directories
 echo ""
@@ -37,8 +37,12 @@ DISCORD_TOKEN=
 EMAIL_FROM=
 EMAIL_PASSWORD=
 EMAIL_TO=
-OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b
+LLM_API_KEY=
+LLM_BASE_URL=https://integrate.api.nvidia.com/v1
+LLM_MODEL=nvidia/nemotron-3-ultra-550b-a55b
+LLM_TEMPERATURE=0.6
+LLM_MAX_TOKENS=16384
+LLM_ENABLE_THINKING=false
 HOURS_LOOKBACK=5
 FETCH_DELAY_SECONDS=2
 EOF
@@ -47,10 +51,9 @@ else
     echo "      Skipped: .env already exists."
 fi
 
-# 4. Make run.sh executable and patch its path
+# 4. Make run.sh executable (it resolves its own path — no patching needed)
 echo ""
 echo "[4/5] Configuring run.sh ..."
-sed -i "s|/path/to/discord-analyzer|$SCRIPT_DIR|g" "$RUN_SH"
 chmod +x "$RUN_SH"
 echo "      Done: run.sh is executable."
 
@@ -93,9 +96,9 @@ echo "  3. Test a manual run:"
 echo "     cd $SCRIPT_DIR && python3 main.py"
 echo ""
 echo "  4. (Optional) Activate LLM analysis:"
-echo "     ollama pull qwen2.5:7b"
-echo "     Then set OLLAMA_URL=http://localhost:11434 in .env"
-echo "     And swap _stub_analyze_group → _llm_analyze_group in analyzer.py"
+echo "     Set LLM_API_KEY in .env (e.g. an NVIDIA nvapi-... key)."
+echo "     LLM analysis turns on automatically when a key is present;"
+echo "     otherwise the pipeline falls back to stub output."
 echo ""
 echo "  Cron runs at: 06:00, 10:00, 14:00, 18:00, 22:00 daily"
 echo "  Logs: $LOG_DIR/analyzer.log"

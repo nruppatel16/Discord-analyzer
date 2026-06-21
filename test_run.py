@@ -1,7 +1,7 @@
 """
 test_run.py — One-time end-to-end pipeline validation with real data.
 
-Uses real Discord token, real Ollama, real email.
+Uses real Discord token, real LLM API, real email.
 Writes to test_analyzer.db and reports/test_run.html ONLY.
 Does NOT touch analyzer.db, reports/latest.html, or cron.
 
@@ -67,7 +67,7 @@ def run():
     status = {
         "discord":  False,
         "messages": 0,
-        "ollama":   False,
+        "llm":      False,
         "tickers":  0,
         "lessons":  0,
         "general":  0,
@@ -90,7 +90,6 @@ def run():
     email_from     = os.getenv("EMAIL_FROM").strip()
     email_password = os.getenv("EMAIL_PASSWORD").strip()
     email_to       = os.getenv("EMAIL_TO").strip()
-    ollama_url     = os.getenv("OLLAMA_URL", "http://localhost:11434").strip()
     delay_seconds  = float(os.getenv("FETCH_DELAY_SECONDS", "2"))
 
     if not os.path.exists("servers.yaml"):
@@ -177,17 +176,17 @@ def run():
         print("  ⚠  No new messages found in the last "
               f"{TEST_HOURS}h (may all be deduped or channels empty).")
 
-    # ── 4. Check Ollama ───────────────────────────────────────────────────
-    section("4 / 7  OLLAMA LLM")
-    ollama_ok = analyzer._check_ollama(ollama_url)
-    if ollama_ok:
-        ok(f"Connected to Ollama at {ollama_url}")
-        model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    # ── 4. Check LLM API ──────────────────────────────────────────────────
+    section("4 / 7  LLM API")
+    llm_ok = analyzer._get_client() is not None
+    if llm_ok:
+        base_url = os.getenv("LLM_BASE_URL", analyzer.DEFAULT_BASE_URL)
+        model = os.getenv("LLM_MODEL", analyzer.DEFAULT_MODEL)
+        ok(f"LLM API configured at {base_url}")
         ok(f"Model: {model}")
-        status["ollama"] = True
+        status["llm"] = True
     else:
-        fail(f"Ollama not reachable at {ollama_url} — "
-             "LLM analysis will fall back to stub")
+        fail("LLM_API_KEY not set — LLM analysis will fall back to stub")
 
     # ── 5. Group + Analyze ────────────────────────────────────────────────
     section("5 / 7  ANALYSIS")
@@ -200,10 +199,10 @@ def run():
         lessons  = analysis.get("lessons", [])
         general  = analysis.get("general_discussion", [])
 
-        if status["ollama"]:
-            ok("LLM analysis complete (Ollama)")
+        if status["llm"]:
+            ok("LLM analysis complete (API)")
         else:
-            ok("Analysis complete (stub fallback — Ollama unavailable)")
+            ok("Analysis complete (stub fallback — LLM API unavailable)")
 
         status["tickers"] = len(tickers)
         status["lessons"] = len(lessons)
@@ -323,7 +322,7 @@ def _send_test_email(
 def _print_summary(status: dict):
     ready = (
         status["discord"]
-        and status["ollama"]
+        and status["llm"]
         and status["report"]
         and status["email"]
     )
@@ -337,7 +336,7 @@ def _print_summary(status: dict):
     print("━" * 42)
     print(f"  Discord fetch:    {sym(status['discord'])}")
     print(f"  Messages fetched: {status['messages']}")
-    print(f"  Ollama LLM:       {sym(status['ollama'])}")
+    print(f"  LLM API:          {sym(status['llm'])}")
     print(f"  Tickers found:    {status['tickers']}")
     print(f"  Lessons:          {status['lessons']}")
     print(f"  Discussion items: {status['general']}")
@@ -351,7 +350,7 @@ def _print_summary(status: dict):
     if not ready:
         problems = []
         if not status["discord"]: problems.append("Discord token")
-        if not status["ollama"]:  problems.append("Ollama LLM")
+        if not status["llm"]:     problems.append("LLM API")
         if not status["report"]:  problems.append("Report generation")
         if not status["email"]:   problems.append("Email delivery")
         print(f"  Fix before enabling cron: {', '.join(problems)}")
