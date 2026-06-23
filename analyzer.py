@@ -27,9 +27,9 @@ import time
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 50        # max messages per LLM call
-CALL_DELAY = 3         # seconds between LLM calls
-LLM_TIMEOUT = 300      # seconds per request (reasoning models can be slow)
+BATCH_SIZE = 250       # max messages per LLM call (override via LLM_BATCH_SIZE)
+CALL_DELAY = 1         # seconds between LLM calls (override via LLM_CALL_DELAY)
+LLM_TIMEOUT = 180      # seconds per request (override via LLM_TIMEOUT)
 DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
@@ -95,7 +95,15 @@ def analyze(conversation_groups: list) -> dict:
         )
         return _stub_analyze_all(conversation_groups)
 
-    logger.info("LLM API ready — model=%s", os.getenv("LLM_MODEL", DEFAULT_MODEL))
+    # Apply env overrides for throughput tuning (read here, after .env is loaded)
+    global BATCH_SIZE, CALL_DELAY
+    BATCH_SIZE = int(os.getenv("LLM_BATCH_SIZE", str(BATCH_SIZE)))
+    CALL_DELAY = float(os.getenv("LLM_CALL_DELAY", str(CALL_DELAY)))
+
+    logger.info(
+        "LLM API ready — model=%s  batch=%d  delay=%.1fs",
+        os.getenv("LLM_MODEL", DEFAULT_MODEL), BATCH_SIZE, CALL_DELAY,
+    )
 
     # ── Flatten message lists with their server/channel context ──────────
     all_ctx: list[dict] = []     # every message + context
@@ -410,13 +418,19 @@ def _llm_call(prompt: str) -> str | None:
         return None
 
     model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
-    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "16384"))
+    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
     temperature = float(os.getenv("LLM_TEMPERATURE", "0.6"))
+    timeout = int(os.getenv("LLM_TIMEOUT", str(LLM_TIMEOUT)))
     enable_thinking = os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("1", "true", "yes")
 
-    extra_body: dict = {"chat_template_kwargs": {"enable_thinking": enable_thinking}}
+    # Reasoning-only params are sent only when thinking is enabled (and the
+    # model supports it); non-reasoning models reject unknown chat_template_kwargs.
+    extra_body: dict = {}
     if enable_thinking:
-        extra_body["reasoning_budget"] = int(os.getenv("LLM_REASONING_BUDGET", "8192"))
+        extra_body = {
+            "chat_template_kwargs": {"enable_thinking": True},
+            "reasoning_budget": int(os.getenv("LLM_REASONING_BUDGET", "8192")),
+        }
 
     try:
         completion = client.chat.completions.create(
@@ -427,7 +441,7 @@ def _llm_call(prompt: str) -> str | None:
             max_tokens=max_tokens,
             extra_body=extra_body,
             stream=True,
-            timeout=LLM_TIMEOUT,
+            timeout=timeout,
         )
 
         parts = []

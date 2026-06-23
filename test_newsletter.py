@@ -3,7 +3,8 @@ test_newsletter.py — One-off: fetch a single channel's recent chat, analyze it
 and email the newsletter. Bypasses the dedup DB so it can be re-run freely.
 
 Usage:
-    python3 test_newsletter.py [CHANNEL_ID] [HOURS] [EMAIL_TO]
+    python3 test_newsletter.py [CHANNEL_ID] [HOURS] [EMAIL_TO] [MODE]
+    MODE = ticker_discussion | qa_educational
 
 Defaults are filled in below. Server/channel names are auto-discovered from the
 Discord API; falls back to placeholders if the lookup is not permitted.
@@ -66,6 +67,7 @@ def main():
     channel_id = sys.argv[1] if len(sys.argv) > 1 else CHANNEL_ID
     hours      = int(sys.argv[2]) if len(sys.argv) > 2 else HOURS
     email_to   = sys.argv[3] if len(sys.argv) > 3 else EMAIL_TO
+    mode       = sys.argv[4] if len(sys.argv) > 4 else MODE
 
     load_dotenv()
     token          = os.getenv("DISCORD_TOKEN", "").strip()
@@ -83,12 +85,12 @@ def main():
     log.info("=" * 60)
 
     server_name, channel_name = _discover_names(channel_id, token)
-    log.info("Resolved: %s / #%s  (mode=%s)", server_name, channel_name, MODE)
+    log.info("Resolved: %s / #%s  (mode=%s)", server_name, channel_name, mode)
 
     server_config = {
         "servers": [{
             "name": server_name,
-            "mode": MODE,
+            "mode": mode,
             "channels": [{"name": channel_name, "channel_id": channel_id}],
         }]
     }
@@ -107,6 +109,12 @@ def main():
         already_processed_fn=lambda _mid: False,
     )
     log.info("Fetched %d message(s).", len(messages))
+
+    # Optional cap (most recent N) for fast validation runs: MAX_MESSAGES=250
+    cap = int(os.getenv("MAX_MESSAGES", "0"))
+    if cap and len(messages) > cap:
+        messages = messages[-cap:]
+        log.info("Capped to most recent %d message(s) for this run.", cap)
 
     # 2. Group
     groups = grouper.group_messages(messages, server_config)
